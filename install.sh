@@ -267,48 +267,80 @@ import os
 import sys
 from datetime import datetime
 
-def extract_arcgis_geometry(geometry):
-    """Extrai geometrias do formato ArcGIS REST"""
+def extract_arcgis_geometry_robust(geometry):
+    """Extrai geometrias do formato ArcGIS de forma mais robusta"""
     if not geometry:
         return None, None
     
-    # Ponto: formato {"x": lon, "y": lat}
-    if 'x' in geometry and 'y' in geometry:
-        return [(geometry['x'], geometry['y'])], 'point'
+    try:
+        # Ponto: formato {"x": lon, "y": lat}
+        if 'x' in geometry and 'y' in geometry:
+            lon = float(geometry['x'])
+            lat = float(geometry['y'])
+            # Verifica se as coordenadas são válidas
+            if -180 <= lon <= 180 and -90 <= lat <= 90:
+                return [(lon, lat)], 'point'
+        
+        # Linha: formato {"paths": [[[lon,lat], [lon,lat], ...]]}
+        elif 'paths' in geometry and geometry['paths']:
+            paths = geometry['paths']
+            all_line_coords = []
+            
+            for path in paths:
+                if isinstance(path, list) and len(path) > 0:
+                    line_coords = []
+                    for coord in path:
+                        if isinstance(coord, list) and len(coord) >= 2:
+                            lon = float(coord[0])
+                            lat = float(coord[1])
+                            if -180 <= lon <= 180 and -90 <= lat <= 90:
+                                line_coords.append((lon, lat))
+                    
+                    if len(line_coords) >= 2:  # Mínimo 2 pontos para linha
+                        all_line_coords.extend(line_coords)
+            
+            if all_line_coords:
+                return all_line_coords, 'linestring'
+        
+        # Polígono: formato {"rings": [[[lon,lat], [lon,lat], ...]]}
+        elif 'rings' in geometry and geometry['rings']:
+            rings = geometry['rings']
+            
+            if rings and len(rings) > 0:
+                exterior_ring = rings[0]  # Primeiro ring é o exterior
+                poly_coords = []
+                
+                for coord in exterior_ring:
+                    if isinstance(coord, list) and len(coord) >= 2:
+                        lon = float(coord[0])
+                        lat = float(coord[1])
+                        if -180 <= lon <= 180 and -90 <= lat <= 90:
+                            poly_coords.append((lon, lat))
+                
+                # Fecha o polígono se necessário e verifica se é válido
+                if len(poly_coords) >= 3:
+                    if poly_coords[0] != poly_coords[-1]:
+                        poly_coords.append(poly_coords[0])
+                    return poly_coords, 'polygon'
+        
+        # Multiponto: formato {"points": [[lon,lat], [lon,lat], ...]}
+        elif 'points' in geometry and geometry['points']:
+            points = geometry['points']
+            valid_points = []
+            
+            for point in points:
+                if isinstance(point, list) and len(point) >= 2:
+                    lon = float(point[0])
+                    lat = float(point[1])
+                    if -180 <= lon <= 180 and -90 <= lat <= 90:
+                        valid_points.append((lon, lat))
+            
+            if valid_points:
+                return valid_points, 'multipoint'
     
-    # Linha: formato {"paths": [[[lon,lat], [lon,lat], ...]]}
-    elif 'paths' in geometry and geometry['paths']:
-        paths = geometry['paths']
-        if paths and len(paths) > 0:
-            first_path = paths[0]
-            line_coords = []
-            for coord in first_path:
-                if isinstance(coord, list) and len(coord) >= 2:
-                    line_coords.append((coord[0], coord[1]))
-            return line_coords, 'linestring'
-    
-    # Polígono: formato {"rings": [[[lon,lat], [lon,lat], ...]]}
-    elif 'rings' in geometry and geometry['rings']:
-        rings = geometry['rings']
-        if rings and len(rings) > 0:
-            exterior_ring = rings[0]  # Primeiro ring é o exterior
-            poly_coords = []
-            for coord in exterior_ring:
-                if isinstance(coord, list) and len(coord) >= 2:
-                    poly_coords.append((coord[0], coord[1]))
-            # Fecha o polígono se necessário
-            if len(poly_coords) >= 3 and poly_coords[0] != poly_coords[-1]:
-                poly_coords.append(poly_coords[0])
-            return poly_coords, 'polygon'
-    
-    # Multiponto: formato {"points": [[lon,lat], [lon,lat], ...]}
-    elif 'points' in geometry and geometry['points']:
-        points = geometry['points']
-        point_coords = []
-        for point in points:
-            if isinstance(point, list) and len(point) >= 2:
-                point_coords.append((point[0], point[1]))
-        return point_coords, 'multipoint'
+    except (ValueError, TypeError) as e:
+        # Ignora geometrias com coordenadas inválidas
+        return None, None
     
     return None, None
 
@@ -360,11 +392,16 @@ def create_description(attributes):
     except Exception as e:
         return f"<![CDATA[<div>Erro ao criar descrição: {str(e)}</div>]]>"
 
-def create_kmz_from_arcgis_data():
-    """Cria KMZ a partir dos dados no formato ArcGIS"""
+def process_layer_in_batches(features, batch_size=1000):
+    """Processa features em lotes para evitar estouro de memória"""
+    for i in range(0, len(features), batch_size):
+        yield features[i:i + batch_size]
+
+def create_kmz_final():
+    """Cria KMZ final com tratamento robusto de geometrias"""
     kml = simplekml.Kml()
     kml.document.name = "EPE Webmap - Dados Completos"
-    kml.document.description = "Exportação completa do Webmap da EPE contendo sistema elétrico, infraestrutura energética e dados ambientais"
+    kml.document.description = "Exportação completa do Webmap da EPE"
     
     # Encontra todos os arquivos de camadas
     layer_files = glob.glob("epe_data/camada_*.json")
@@ -374,9 +411,9 @@ def create_kmz_from_arcgis_data():
         print("💡 Execute primeiro: python3 exportar_dados.py")
         return
     
-    print("🚀 INICIANDO CONVERSÃO PARA KMZ")
+    print("🚀 INICIANDO CONVERSÃO FINAL PARA KMZ")
     print(f"📁 Encontrados {len(layer_files)} arquivos de camadas")
-    print("🎯 Convertendo formato ArcGIS REST para KML...")
+    print("🎯 Processando com tratamento robusto de geometrias...")
     print("⏰ Isso pode demorar vários minutos...\n")
     
     total_features_converted = 0
@@ -395,107 +432,111 @@ def create_kmz_from_arcgis_data():
             features = data.get('features', [])
             layer_geom_stats = {}
             
-            print(f"🔧 Processando {layer_name} ({len(features)} features)...")
+            print(f"🔧 Processando {layer_name} ({len(features):,} features)...")
             
-            for i, feature in enumerate(features):
-                try:
-                    # Formato ArcGIS: feature tem "attributes" e "geometry"
-                    attributes = feature.get('attributes', {})
-                    geometry = feature.get('geometry', {})
-                    
-                    # Detecta tipo de geometria
-                    geom_type = 'unknown'
-                    if 'x' in geometry and 'y' in geometry:
-                        geom_type = 'point'
-                    elif 'paths' in geometry:
-                        geom_type = 'linestring'
-                    elif 'rings' in geometry:
-                        geom_type = 'polygon'
-                    elif 'points' in geometry:
-                        geom_type = 'multipoint'
-                    
-                    layer_geom_stats[geom_type] = layer_geom_stats.get(geom_type, 0) + 1
-                    
-                    # Extrai coordenadas
-                    coords, final_geom_type = extract_arcgis_geometry(geometry)
-                    
-                    if coords and final_geom_type:
-                        # Cria nome baseado nas propriedades
-                        name_keys = ['OBJECTID', 'Name', 'NOME', 'DESCRICAO', 'ID', 'nome', 'leilao', 'ceg', 'CEG']
-                        feature_name = f"Feature_{i+1}"
-                        for key in name_keys:
-                            if key in attributes and attributes[key] is not None:
-                                feature_name = str(attributes[key])
-                                break
+            # Processa em lotes para camadas muito grandes
+            batch_size = 5000
+            total_batches = (len(features) + batch_size - 1) // batch_size
+            
+            for batch_num, batch_features in enumerate(process_layer_in_batches(features, batch_size), 1):
+                if total_batches > 1:
+                    print(f"    📦 Lote {batch_num}/{total_batches}...")
+                
+                for i, feature in enumerate(batch_features):
+                    try:
+                        attributes = feature.get('attributes', {})
+                        geometry = feature.get('geometry', {})
                         
-                        # Converte para KML
-                        if final_geom_type == 'point':
-                            pnt = folder.newpoint(
-                                name=feature_name,
-                                coords=coords,
-                                description=create_description(attributes)
-                            )
-                            # Estilo para pontos
-                            pnt.style.iconstyle.color = simplekml.Color.blue
-                            pnt.style.iconstyle.scale = 0.8
-                            feature_count += 1
+                        # Detecta tipo de geometria
+                        geom_type = 'unknown'
+                        if 'x' in geometry and 'y' in geometry:
+                            geom_type = 'point'
+                        elif 'paths' in geometry:
+                            geom_type = 'linestring'
+                        elif 'rings' in geometry:
+                            geom_type = 'polygon'
+                        elif 'points' in geometry:
+                            geom_type = 'multipoint'
+                        
+                        layer_geom_stats[geom_type] = layer_geom_stats.get(geom_type, 0) + 1
+                        
+                        # Extrai coordenadas com método robusto
+                        coords, final_geom_type = extract_arcgis_geometry_robust(geometry)
+                        
+                        if coords and final_geom_type:
+                            # Cria nome baseado nas propriedades
+                            name_keys = ['OBJECTID', 'Name', 'NOME', 'DESCRICAO', 'ID', 'nome', 'leilao', 'ceg', 'CEG']
+                            feature_name = f"Feature_{feature_count + 1}"
+                            for key in name_keys:
+                                if key in attributes and attributes[key] is not None:
+                                    feature_name = str(attributes[key])
+                                    break
                             
-                        elif final_geom_type == 'multipoint':
-                            for j, point_coord in enumerate(coords):
+                            # Converte para KML
+                            if final_geom_type == 'point':
                                 pnt = folder.newpoint(
-                                    name=f"{feature_name}_{j+1}",
-                                    coords=[point_coord],
+                                    name=feature_name,
+                                    coords=coords,
                                     description=create_description(attributes)
                                 )
                                 pnt.style.iconstyle.color = simplekml.Color.blue
-                                pnt.style.iconstyle.scale = 0.6
-                            feature_count += len(coords)
-                            
-                        elif final_geom_type == 'linestring':
-                            lin = folder.newlinestring(
-                                name=feature_name,
-                                coords=coords,
-                                description=create_description(attributes)
-                            )
-                            # Estilo para linhas
-                            lin.style.linestyle.color = simplekml.Color.red
-                            lin.style.linestyle.width = 2
-                            feature_count += 1
-                            
-                        elif final_geom_type == 'polygon':
-                            pol = folder.newpolygon(
-                                name=feature_name,
-                                outerboundaryis=coords,
-                                description=create_description(attributes)
-                            )
-                            # Estilo para polígonos
-                            pol.style.polystyle.color = simplekml.Color.changealpha('80', simplekml.Color.green)
-                            pol.style.linestyle.color = simplekml.Color.darkgreen
-                            pol.style.linestyle.width = 1
-                            feature_count += 1
-                            
-                except Exception as e:
-                    # Continua processando mesmo com erros em features individuais
-                    if i < 3:  # Mostra apenas os primeiros erros para evitar spam
-                        print(f"    ⚠️  Erro na feature {i}: {str(e)[:80]}...")
-                    continue
+                                pnt.style.iconstyle.scale = 0.8
+                                feature_count += 1
+                                
+                            elif final_geom_type == 'multipoint':
+                                for j, point_coord in enumerate(coords):
+                                    pnt = folder.newpoint(
+                                        name=f"{feature_name}_{j+1}",
+                                        coords=[point_coord],
+                                        description=create_description(attributes)
+                                    )
+                                    pnt.style.iconstyle.color = simplekml.Color.blue
+                                    pnt.style.iconstyle.scale = 0.6
+                                feature_count += len(coords)
+                                
+                            elif final_geom_type == 'linestring':
+                                lin = folder.newlinestring(
+                                    name=feature_name,
+                                    coords=coords,
+                                    description=create_description(attributes)
+                                )
+                                lin.style.linestyle.color = simplekml.Color.red
+                                lin.style.linestyle.width = 2
+                                feature_count += 1
+                                
+                            elif final_geom_type == 'polygon':
+                                pol = folder.newpolygon(
+                                    name=feature_name,
+                                    outerboundaryis=coords,
+                                    description=create_description(attributes)
+                                )
+                                pol.style.polystyle.color = simplekml.Color.changealpha('80', simplekml.Color.green)
+                                pol.style.linestyle.color = simplekml.Color.darkgreen
+                                pol.style.linestyle.width = 1
+                                feature_count += 1
+                                
+                    except Exception as e:
+                        # Continua processando mesmo com erros em features individuais
+                        continue
             
             # Estatísticas da camada
             if layer_geom_stats:
                 geometry_statistics[layer_name] = layer_geom_stats
             
             if feature_count > 0:
-                print(f"✅ {layer_name}: {feature_count} features convertidas")
+                print(f"✅ {layer_name}: {feature_count:,} features convertidas")
+                print(f"   📊 Tipos: {layer_geom_stats}")
                 layers_with_data += 1
                 total_features_converted += feature_count
             else:
                 print(f"❌ {layer_name}: 0 features convertidas")
+                print(f"   📊 Estrutura: {layer_geom_stats}")
                 
         except Exception as e:
             print(f"💥 ERRO CRÍTICO em {layer_file}: {str(e)}")
     
     # Salva o KMZ
-    output_file = "EPE_WEBMAP_COMPLETO.kmz"
+    output_file = "EPE_WEBMAP_FINAL.kmz"
     kml.savekmz(output_file)
     
     # Relatório final
@@ -518,10 +559,10 @@ def create_kmz_from_arcgis_data():
         'conversion_date': datetime.now().isoformat()
     }
     
-    with open('relatorio_conversao_kmz.json', 'w', encoding='utf-8') as f:
+    with open('relatorio_conversao_final.json', 'w', encoding='utf-8') as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     
-    print(f"📄 Relatório salvo: relatorio_conversao_kmz.json")
+    print(f"📄 Relatório salvo: relatorio_conversao_final.json")
     
     if layers_with_data > 0:
         print(f"\n🎯 PRONTO! Abra o arquivo '{output_file}' no Google Earth")
@@ -529,7 +570,66 @@ def create_kmz_from_arcgis_data():
         print(f"\n🔴 Nenhuma feature foi convertida. Verifique os dados de entrada.")
 
 if __name__ == "__main__":
-    create_kmz_from_arcgis_data()
+    create_kmz_final()
+EOF
+
+# Criar diagnose_geometrias.py
+cat > diagnose_geometrias.py << 'EOF'
+import json
+import glob
+import os  # Esta linha estava faltando!
+
+def diagnose_problematic_geometries():
+    """Diagnostica geometrias problemáticas nas camadas"""
+    print("=== DIAGNÓSTICO DE GEOMETRIAS PROBLEMÁTICAS ===\n")
+    
+    layer_files = glob.glob("epe_data/camada_*.json")
+    
+    for layer_file in sorted(layer_files):
+        try:
+            with open(layer_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            layer_name = os.path.basename(layer_file).replace('.json', '')
+            features = data.get('features', [])
+            
+            if features:
+                # Analisa as primeiras 3 features
+                print(f"📂 {layer_name} ({len(features)} features):")
+                
+                for i, feature in enumerate(features[:3]):  # Apenas 3 primeiras
+                    geometry = feature.get('geometry', {})
+                    attributes = feature.get('attributes', {})
+                    
+                    print(f"   Feature {i+1}:")
+                    
+                    # Verifica tipo de geometria
+                    if 'x' in geometry and 'y' in geometry:
+                        print(f"     📍 Ponto: x={geometry['x']}, y={geometry['y']}")
+                    elif 'paths' in geometry:
+                        paths = geometry['paths']
+                        print(f"     📏 Linha: {len(paths)} paths, primeiro com {len(paths[0]) if paths else 0} pontos")
+                    elif 'rings' in geometry:
+                        rings = geometry['rings']
+                        print(f"     🟦 Polígono: {len(rings)} rings, primeiro com {len(rings[0]) if rings else 0} pontos")
+                    elif 'points' in geometry:
+                        points = geometry['points']
+                        print(f"     📌 Multiponto: {len(points)} pontos")
+                    else:
+                        print(f"     ❓ Geometria desconhecida: {list(geometry.keys())}")
+                    
+                    # Mostra alguns atributos
+                    sample_attrs = {k: v for k, v in list(attributes.items())[:3]}
+                    print(f"     📋 Atributos: {sample_attrs}")
+                
+                print()
+                
+        except Exception as e:
+            print(f"❌ Erro em {layer_file}: {e}\n")
+
+if __name__ == "__main__":
+    diagnose_problematic_geometries()
+
 EOF
 
 # Criar script de execução
@@ -590,7 +690,8 @@ echo "   - O processo pode demorar 30-60 minutos"
 echo "   - Serão criados ~300MB de dados temporários"
 echo "   - O KMZ final terá ~50-200MB"
 echo "   - Sempre ative o ambiente virtual: source venv/bin/activate"
-echo " Aumentar swap se necessario"
+echo ""
+echo "### Aumentar swap se necessario"
 echo "fallocate -l 1G /swapfile"
 echo "chmod 600 /swapfile"
 echo "mkswap /swapfile"
